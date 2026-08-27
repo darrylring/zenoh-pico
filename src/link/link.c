@@ -70,6 +70,11 @@ z_result_t _z_open_link(_z_link_t *zl, const _z_string_t *locator, const _z_conf
             ret = _z_new_link_serial(zl, ep);
         } else
 #endif
+#if Z_FEATURE_LINK_CAN == 1
+            if (_z_endpoint_can_valid(&ep) == _Z_RES_OK) {
+            ret = _z_new_link_can_unicast(zl, ep);
+        } else
+#endif
 #if Z_FEATURE_LINK_WS == 1
             if (_z_endpoint_ws_valid(&ep) == _Z_RES_OK) {
             ret = _z_new_link_ws(zl, &ep);
@@ -129,6 +134,11 @@ z_result_t _z_listen_link(_z_link_t *zl, const _z_string_t *locator, const _z_co
 #if Z_FEATURE_LINK_BLUETOOTH == 1
             if (_z_endpoint_bt_valid(&ep) == _Z_RES_OK) {
             ret = _z_new_link_bt(zl, ep);
+        } else
+#endif
+#if Z_FEATURE_LINK_CAN == 1
+            if (_z_endpoint_can_valid(&ep) == _Z_RES_OK) {
+            ret = _z_new_link_can_multicast(zl, ep);
         } else
 #endif
             if (_z_endpoint_raweth_valid(&ep) == _Z_RES_OK) {
@@ -195,6 +205,18 @@ size_t _z_link_recv_exact_zbuf(const _z_link_t *link, _z_zbuf_t *zbf, size_t len
 }
 
 size_t _z_link_socket_recv_zbuf(const _z_link_t *link, _z_zbuf_t *zbf, const _z_sys_net_socket_t socket) {
+#if Z_FEATURE_LINK_CAN == 1
+    // A CAN link reassembles datagrams from frames, and the state for that is in the link, not
+    // in a bare socket, so it is read through the link.
+    if (link->_type == _Z_LINK_TYPE_CAN) {
+        _ZP_UNUSED(socket);
+        size_t rb = link->_read_f(link, _z_zbuf_get_wptr(zbf), _z_zbuf_space_left(zbf), NULL);
+        if (rb != SIZE_MAX) {
+            _z_zbuf_set_wpos(zbf, _z_zbuf_get_wpos(zbf) + rb);
+        }
+        return rb;
+    }
+#endif
     size_t rb = link->_read_socket_f(socket, _z_zbuf_get_wptr(zbf), _z_zbuf_space_left(zbf));
     if (rb != SIZE_MAX) {
         _z_zbuf_set_wpos(zbf, _z_zbuf_get_wpos(zbf) + rb);
@@ -246,6 +268,10 @@ const _z_sys_net_socket_t *_z_link_get_socket(const _z_link_t *link) {
 #if Z_FEATURE_LINK_SERIAL == 1
         case _Z_LINK_TYPE_SERIAL:
             return &link->_socket._serial._sock;
+#endif
+#if Z_FEATURE_LINK_CAN == 1
+        case _Z_LINK_TYPE_CAN:
+            return &link->_socket._can._sock;
 #endif
 #if Z_FEATURE_LINK_WS == 1
         case _Z_LINK_TYPE_WS:
