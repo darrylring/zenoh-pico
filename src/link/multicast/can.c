@@ -292,7 +292,7 @@ z_result_t _z_can_claim_id(const char *dev, uint32_t bitrate, uint32_t dbitrate,
     ret = _Z_ERR_TRANSPORT_OPEN_FAILED;
     for (uint8_t attempt = 0; (attempt < Z_CAN_ID_REQUEST_TRIES) && (ret != _Z_RES_OK); attempt++) {
         // Devices that start together would otherwise all ask at the same instant
-        z_sleep_ms(z_random_u32() % 100u);
+        z_sleep_ms(z_random_u32() % Z_CAN_ID_REQUEST_JITTER_MS);
         if (_z_can_encode(uid, sizeof(uid), request, attempt, frame_max, __z_can_emit, &sock) != _Z_RES_OK) {
             continue;
         }
@@ -361,6 +361,14 @@ size_t _z_read_can(_z_can_socket_t *sock, uint8_t *ptr, size_t len, _z_slice_t *
 
         if (_Z_CAN_ID_KIND(id) != _Z_CAN_KIND_DATA) {
             continue;  // not data: a request for an id, or the answer to one
+        }
+
+        // The controller's filter keeps frames for other nodes out, but it is not the only thing that decides what
+        // this link acts on: a filter outlives the task that set it, so one left by a task that was killed would
+        // let this link hear, and answer, frames addressed to the id that task had.
+        uint8_t want = (sock->_peer == _Z_CAN_NODE_NONE) ? _Z_CAN_NODE_BROADCAST : sock->_node;
+        if (_Z_CAN_ID_DST(id) != want) {
+            continue;
         }
 
         uint8_t src = _Z_CAN_ID_SRC(id);

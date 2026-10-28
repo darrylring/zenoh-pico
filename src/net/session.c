@@ -542,6 +542,12 @@ z_result_t _z_open(_z_session_rc_t *zn, _z_config_t *config, const _z_id_t *zid)
 }
 
 #if Z_FEATURE_AUTO_RECONNECT == 1
+// How long to wait between attempts to reopen a session that was lost. A link that is cheap to try, such as one
+// to a router on the same bus, can ask for less.
+#ifndef Z_CLIENT_REOPEN_INTERVAL_MS
+#define Z_CLIENT_REOPEN_INTERVAL_MS 1000
+#endif
+
 void _z_client_reopen_task_drop(void *ztc_arg) {
     _z_transport_common_t *tc = (_z_transport_common_t *)ztc_arg;
     if (tc->_state == _Z_TRANSPORT_STATE_RECONNECTING) {
@@ -571,12 +577,12 @@ _z_fut_fn_result_t _z_client_reopen_task_fn(void *ztc_arg, _z_executor_t *execut
             ret == _Z_ERR_TRANSPORT_RX_DURATION_EXPIRED || ret == _Z_ERR_TRANSPORT_OPEN_PARTIAL_CONNECTIVITY ||
             // A router that is going away answers the first message of a handshake with its own Close
             ret == _Z_ERR_MESSAGE_UNEXPECTED) {
-            _Z_DEBUG("Reopen failed, next try in 1s");
+            _Z_DEBUG("Reopen failed, next try in %ums", (unsigned)Z_CLIENT_REOPEN_INTERVAL_MS);
             tc->_session = _z_session_rc_clone_as_weak(&zs);
             tc->_state = _Z_TRANSPORT_STATE_RECONNECTING;
             tc->_tasks = tasks_handles;
             _z_session_rc_drop(&zs);
-            return _z_fut_fn_result_wake_up_after(1000);
+            return _z_fut_fn_result_wake_up_after(Z_CLIENT_REOPEN_INTERVAL_MS);
         } else {
             _Z_ERROR("Reopen failed, will not retry");
             tc->_state = _Z_TRANSPORT_STATE_CLOSED;

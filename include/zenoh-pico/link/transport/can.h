@@ -95,12 +95,19 @@ extern "C" {
 #define _Z_CAN_ID_MAKE_CTL(kind, key, dst, src) \
     (_Z_CAN_ID_MAKE(0u, (key), (dst), (src)) | (((uint32_t)(kind)&_Z_CAN_KIND_MASK) << _Z_CAN_ID_KIND_SHIFT))
 
-// How long to wait for the answer to one request, and how many to send.
+// How long to wait for the answer to one request, and how many to send. The answer is a single frame from a
+// node that is up, so it arrives in a few milliseconds; the rest is how long a device asks before it gives up,
+// which is how long it takes to notice that a router that has just appeared is there.
 #ifndef Z_CAN_ID_REQUEST_WAIT_MS
-#define Z_CAN_ID_REQUEST_WAIT_MS 300u
+#define Z_CAN_ID_REQUEST_WAIT_MS 100u
 #endif
 #ifndef Z_CAN_ID_REQUEST_TRIES
-#define Z_CAN_ID_REQUEST_TRIES 10u
+#define Z_CAN_ID_REQUEST_TRIES 8u
+#endif
+// Each request is sent after a random delay of up to this many milliseconds, so that devices that start together
+// do not all ask at the same instant.
+#ifndef Z_CAN_ID_REQUEST_JITTER_MS
+#define Z_CAN_ID_REQUEST_JITTER_MS 64u
 #endif
 
 // What a hardware filter must match to receive frames addressed to `dst`.
