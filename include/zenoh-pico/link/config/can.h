@@ -33,8 +33,10 @@ extern "C" {
 //            devicetree node label)
 //   bitrate  arbitration-phase bit rate; also the sole rate for classic CAN
 //   dbitrate CAN FD data-phase bit rate. 0 selects classic CAN (8-byte frames)
-//   id       THIS node, 0..254. It is the source in every identifier we send.
-//   peer     0..254. Makes the link UNICAST to that one node.
+//   id       THIS node, 0..253. It is the source in every identifier we send.
+//            Left out on a link that connects, the node asks the router for one
+//            (see link/transport/can.h)
+//   peer     0..253. Makes the link UNICAST to that one node.
 //
 // One endpoint syntax, one frame format, two link kinds, the way `udp` does it:
 // a locator that is listened on is multicast and every frame goes to all nodes
@@ -42,7 +44,8 @@ extern "C" {
 // `peer`, and every frame goes to that node and hears only that node.
 //
 // Node ids must be unique on the bus. CAN does not allow two nodes to send
-// different data under one identifier, and the source is part of it.
+// different data under one identifier, and the source is part of it. Asking for
+// one is how a device with nothing but a long unique id gets one.
 //
 // The identifier is the bus priority as well as the address: lowest wins
 // arbitration, and the zenoh priority sits in its high bits, so an urgent

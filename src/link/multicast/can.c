@@ -104,18 +104,29 @@ static z_result_t __z_can_open(_z_link_t *self, _Bool unicast) {
     const _z_str_intmap_t *cfg = &self->_endpoint._config;
     uint32_t bitrate = __z_can_cfg_u32(cfg, CAN_CONFIG_BITRATE_KEY, CAN_CONFIG_DEFAULT_BITRATE);
     uint32_t dbitrate = __z_can_cfg_u32(cfg, CAN_CONFIG_DBITRATE_KEY, CAN_CONFIG_DEFAULT_DBITRATE);
+    _Bool has_id = _z_str_intmap_get(cfg, CAN_CONFIG_ID_KEY) != NULL;
     uint32_t node = __z_can_cfg_u32(cfg, CAN_CONFIG_ID_KEY, CAN_CONFIG_DEFAULT_ID);
     uint32_t peer = __z_can_cfg_u32(cfg, CAN_CONFIG_PEER_KEY, _Z_CAN_NODE_NONE);
 
-    // 0xFF is the broadcast address, so it cannot name a node.
-    if (node >= _Z_CAN_NODE_BROADCAST) {
-        _Z_ERROR("CAN: node id %u is out of range 0..254", (unsigned)node);
+    // 0xFF is the broadcast address and 0xFE the unassigned one, so neither can
+    // name a node.
+    if (has_id && (node > _Z_CAN_NODE_MAX)) {
+        _Z_ERROR("CAN: node id %u is out of range 0..%u", (unsigned)node, (unsigned)_Z_CAN_NODE_MAX);
         return _Z_ERR_CONFIG_LOCATOR_INVALID;
     }
     if (unicast) {
-        if ((peer >= _Z_CAN_NODE_BROADCAST) || (peer == node)) {
-            _Z_ERROR("CAN: a unicast endpoint needs peer=<0..254>, other than its own id");
+        if ((peer > _Z_CAN_NODE_MAX) || (has_id && (peer == node))) {
+            _Z_ERROR("CAN: a unicast endpoint needs peer=<0..%u>, other than its own id", (unsigned)_Z_CAN_NODE_MAX);
             return _Z_ERR_CONFIG_LOCATOR_INVALID;
+        }
+        if (!has_id) {
+            // No id: ask the node we are connecting to for one
+            uint8_t assigned = 0;
+            z_result_t claimed = _z_can_claim_id(dev, bitrate, dbitrate, (uint8_t)peer, &assigned);
+            if (claimed != _Z_RES_OK) {
+                return claimed;
+            }
+            node = assigned;
         }
     } else {
         peer = _Z_CAN_NODE_NONE;
@@ -241,6 +252,87 @@ static z_result_t __z_can_emit(void *ctx, uint32_t id, const uint8_t *data, size
     return _z_can_dev_send((const _z_can_socket_t *)ctx, id, data, len);
 }
 
+// ---------------------------------------------------------------------------
+// Asking for a node id
+
+__attribute__((weak)) void _z_can_uid(uint8_t uid[_Z_CAN_UID_SIZE]) {
+    for (size_t i = 0; i < _Z_CAN_UID_SIZE; i += sizeof(uint32_t)) {
+        uint32_t r = z_random_u32();
+        memcpy(&uid[i], &r, sizeof(r));
+    }
+}
+
+// A few bits of the UID, for the key field of its request, so that two devices that
+// ask at once send different identifiers. The router does not check it.
+static uint8_t __z_can_uid_key(const uint8_t *uid) {
+    uint8_t h = 0;
+    for (size_t i = 0; i < _Z_CAN_UID_SIZE; i++) {
+        h = (uint8_t)((uint8_t)(h << 3) | (uint8_t)(h >> 5)) ^ uid[i];
+    }
+    return (uint8_t)(h & _Z_CAN_KEY_MASK);
+}
+
+z_result_t _z_can_claim_id(const char *dev, uint32_t bitrate, uint32_t dbitrate, uint8_t peer, uint8_t *node) {
+    _z_can_socket_t sock;
+    memset(&sock, 0, sizeof(sock));
+    sock._node = _Z_CAN_NODE_UNASSIGNED;
+    sock._peer = peer;
+
+    // Hear what is addressed to the unassigned address, which is where the router answers
+    z_result_t ret = _z_can_dev_open(&sock, dev, bitrate, dbitrate, _Z_CAN_NODE_UNASSIGNED);
+    if (ret != _Z_RES_OK) {
+        return ret;
+    }
+
+    uint8_t uid[_Z_CAN_UID_SIZE];
+    _z_can_uid(uid);
+    uint32_t request = _Z_CAN_ID_MAKE_CTL(_Z_CAN_KIND_ID_REQUEST, __z_can_uid_key(uid), peer, _Z_CAN_NODE_UNASSIGNED);
+    size_t frame_max = sock._fd_mode ? _Z_CAN_FD_FRAME_LEN : _Z_CAN_CLASSIC_FRAME_LEN;
+
+    ret = _Z_ERR_TRANSPORT_OPEN_FAILED;
+    for (uint8_t attempt = 0; (attempt < Z_CAN_ID_REQUEST_TRIES) && (ret != _Z_RES_OK); attempt++) {
+        // Devices that start together would otherwise all ask at the same instant
+        z_sleep_ms(z_random_u32() % 100u);
+        if (_z_can_encode(uid, sizeof(uid), request, attempt, frame_max, __z_can_emit, &sock) != _Z_RES_OK) {
+            continue;
+        }
+
+        z_clock_t start = z_clock_now();
+        while (z_clock_elapsed_ms(&start) < Z_CAN_ID_REQUEST_WAIT_MS) {
+            uint32_t id = 0;
+            uint8_t frame[_Z_CAN_FD_FRAME_LEN];
+            size_t flen = sizeof(frame);
+            if (_z_can_dev_recv(&sock, &id, frame, &flen) != _Z_RES_OK) {
+                continue;  // nothing within the read timeout
+            }
+            if ((_Z_CAN_ID_KIND(id) != _Z_CAN_KIND_ID_ASSIGN) || (_Z_CAN_ID_SRC(id) != peer)) {
+                continue;
+            }
+
+            uint8_t answer[_Z_CAN_UID_SIZE + 1u];
+            size_t alen = 0;
+            if ((_z_can_decode(&sock._rx, id, frame, flen, answer, sizeof(answer), &alen) != 1) ||
+                (alen != sizeof(answer)) || (memcmp(answer, uid, _Z_CAN_UID_SIZE) != 0)) {
+                continue;  // not for us
+            }
+            if ((answer[_Z_CAN_UID_SIZE] > _Z_CAN_NODE_MAX) || (answer[_Z_CAN_UID_SIZE] == peer)) {
+                _Z_ERROR("CAN: the node gave an id that cannot be used: %u", (unsigned)answer[_Z_CAN_UID_SIZE]);
+                continue;
+            }
+            *node = answer[_Z_CAN_UID_SIZE];
+            ret = _Z_RES_OK;
+            break;
+        }
+    }
+
+    _z_can_dev_close(&sock);
+    _z_can_rx_clear(&sock._rx);
+    if (ret != _Z_RES_OK) {
+        _Z_ERROR("CAN: node %u did not give an id", (unsigned)peer);
+    }
+    return ret;
+}
+
 size_t _z_send_can(_z_can_socket_t *sock, const uint8_t *ptr, size_t len) {
     // Zenoh gives the link no per-batch priority yet, so everything goes out
     // at the socket's, and the key field stays 0 (see link/transport/can.h).
@@ -265,6 +357,10 @@ size_t _z_read_can(_z_can_socket_t *sock, uint8_t *ptr, size_t len, _z_slice_t *
         size_t flen = sizeof(frame);
         if (_z_can_dev_recv(sock, &id, frame, &flen) != _Z_RES_OK) {
             return SIZE_MAX;
+        }
+
+        if (_Z_CAN_ID_KIND(id) != _Z_CAN_KIND_DATA) {
+            continue;  // not data: a request for an id, or the answer to one
         }
 
         uint8_t src = _Z_CAN_ID_SRC(id);

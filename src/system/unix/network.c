@@ -170,6 +170,14 @@ z_result_t _z_can_dev_open(_z_can_socket_t *sock, const char *dev, uint32_t bitr
         return _Z_ERR_GENERIC;
     }
 
+    // Time out as the other links do, so that a read does not wait forever for a bus
+    // that has gone quiet. That is reported as an error, which the link turns into "no data".
+    struct timeval timeout = {
+        .tv_sec = Z_CONFIG_SOCKET_TIMEOUT / 1000,
+        .tv_usec = (Z_CONFIG_SOCKET_TIMEOUT % 1000) * 1000,
+    };
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
     sock->_sock._fd = fd;
     sock->_fd_mode = fd_mode;
     return _Z_RES_OK;

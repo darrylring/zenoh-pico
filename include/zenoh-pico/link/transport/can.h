@@ -38,7 +38,7 @@ extern "C" {
 //
 //   28..26  priority   zenoh priority (1 = real-time ... 7 = background)
 //   25..21  key id     the sender's ExprId for the topic, 0 = none
-//   20..16  reserved   zero
+//   20..16  kind       0 = data, 1 = id request, 2 = id assign
 //   15..8   destination node, 0xFF = every node (multicast)
 //    7..0   source node
 //
@@ -49,23 +49,59 @@ extern "C" {
 // not parse zenoh's messages, so it does not fill it yet and sends 0.
 #define _Z_CAN_ID_SRC_SHIFT 0u
 #define _Z_CAN_ID_DST_SHIFT 8u
+#define _Z_CAN_ID_KIND_SHIFT 16u
 #define _Z_CAN_ID_KEY_SHIFT 21u
 #define _Z_CAN_ID_PRIO_SHIFT 26u
 
 #define _Z_CAN_NODE_MASK 0xFFu
 #define _Z_CAN_NODE_BROADCAST 0xFFu  // destination of multicast frames
 #define _Z_CAN_NODE_NONE 0xFFu       // "no peer": the unicast peer of a multicast link
+#define _Z_CAN_NODE_UNASSIGNED 0xFEu  // the source of a node that has no id yet
+#define _Z_CAN_NODE_MAX 0xFDu         // the highest id a node may have
 #define _Z_CAN_KEY_MASK 0x1Fu
+#define _Z_CAN_KIND_MASK 0x1Fu
 #define _Z_CAN_PRIO_MASK 0x07u
 
 #define _Z_CAN_ID_MAKE(prio, key, dst, src)                                                                  \
     ((((uint32_t)(prio)&_Z_CAN_PRIO_MASK) << _Z_CAN_ID_PRIO_SHIFT) |                                         \
      (((uint32_t)(key)&_Z_CAN_KEY_MASK) << _Z_CAN_ID_KEY_SHIFT) |                                            \
      (((uint32_t)(dst)&_Z_CAN_NODE_MASK) << _Z_CAN_ID_DST_SHIFT) | (((uint32_t)(src)&_Z_CAN_NODE_MASK)))
+#define _Z_CAN_ID_KIND(id) ((uint8_t)(((id) >> _Z_CAN_ID_KIND_SHIFT) & _Z_CAN_KIND_MASK))
 #define _Z_CAN_ID_SRC(id) ((uint8_t)(((id) >> _Z_CAN_ID_SRC_SHIFT) & _Z_CAN_NODE_MASK))
 #define _Z_CAN_ID_DST(id) ((uint8_t)(((id) >> _Z_CAN_ID_DST_SHIFT) & _Z_CAN_NODE_MASK))
 #define _Z_CAN_ID_KEY(id) ((uint8_t)(((id) >> _Z_CAN_ID_KEY_SHIFT) & _Z_CAN_KEY_MASK))
 #define _Z_CAN_ID_PRIO(id) ((uint8_t)(((id) >> _Z_CAN_ID_PRIO_SHIFT) & _Z_CAN_PRIO_MASK))
+
+// ---------------------------------------------------------------------------
+// Node ids
+//
+// A device's unique id is far too long to be its address on the bus, so a
+// device that connects without `id` asks the node it connects to for one. The
+// request is sent from the unassigned address and carries the device's UID; the
+// answer comes back to the unassigned address with that UID and the id given,
+// and the device takes the id and goes on to open the link as that node.
+//
+// Both are one frame. They are urgent (priority 0), and the key field carries a
+// few bits of the UID's hash, so that two devices that ask at the same moment do
+// not send the same identifier with different data, which a bus does not
+// survive. The ids need not last: who a device is, is for the protocol above to
+// say.
+#define _Z_CAN_KIND_DATA 0u
+#define _Z_CAN_KIND_ID_REQUEST 1u
+#define _Z_CAN_KIND_ID_ASSIGN 2u
+
+#define _Z_CAN_UID_SIZE 12u
+
+#define _Z_CAN_ID_MAKE_CTL(kind, key, dst, src) \
+    (_Z_CAN_ID_MAKE(0u, (key), (dst), (src)) | (((uint32_t)(kind)&_Z_CAN_KIND_MASK) << _Z_CAN_ID_KIND_SHIFT))
+
+// How long to wait for the answer to one request, and how many to send.
+#ifndef Z_CAN_ID_REQUEST_WAIT_MS
+#define Z_CAN_ID_REQUEST_WAIT_MS 300u
+#endif
+#ifndef Z_CAN_ID_REQUEST_TRIES
+#define Z_CAN_ID_REQUEST_TRIES 10u
+#endif
 
 // What a hardware filter must match to receive frames addressed to `dst`.
 #define _Z_CAN_FILTER_ID(dst) (((uint32_t)(dst)&_Z_CAN_NODE_MASK) << _Z_CAN_ID_DST_SHIFT)
@@ -135,6 +171,7 @@ typedef struct {
     uint8_t _prio;  // priority put in the identifier of what we send
     uint8_t _tid;   // next transfer id
     _Bool _fd_mode;
+    int _rx_filter;  // the platform's handle on this socket's receive filter, if it needs one
     _z_can_rx_t _rx;
 } _z_can_socket_t;
 
@@ -179,6 +216,13 @@ z_result_t _z_can_dev_recv(const _z_can_socket_t *sock, uint32_t *id, uint8_t *d
 
 z_result_t _z_open_can(_z_can_socket_t *sock, const char *dev, uint32_t bitrate, uint32_t dbitrate, uint8_t node,
                        uint8_t peer);
+
+/** Ask the node `peer` for a node id. Opens the interface for the purpose and closes it again. */
+z_result_t _z_can_claim_id(const char *dev, uint32_t bitrate, uint32_t dbitrate, uint8_t peer, uint8_t *node);
+
+/** Fill `uid` with this device's unique id. The default is random, which is
+ *  enough for an id that need not last; a platform that has a UID overrides it. */
+void _z_can_uid(uint8_t uid[_Z_CAN_UID_SIZE]);
 void _z_close_can(_z_can_socket_t *sock);
 
 /** Read one datagram. Skips our own frames and, on a unicast link, anyone but

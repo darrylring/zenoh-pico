@@ -568,7 +568,9 @@ _z_fut_fn_result_t _z_client_reopen_task_fn(void *ztc_arg, _z_executor_t *execut
     if (ret != _Z_RES_OK) {
         if (ret == _Z_ERR_TRANSPORT_OPEN_FAILED || ret == _Z_ERR_SCOUT_NO_RESULTS ||
             ret == _Z_ERR_TRANSPORT_TX_FAILED || ret == _Z_ERR_TRANSPORT_RX_FAILED ||
-            ret == _Z_ERR_TRANSPORT_RX_DURATION_EXPIRED || ret == _Z_ERR_TRANSPORT_OPEN_PARTIAL_CONNECTIVITY) {
+            ret == _Z_ERR_TRANSPORT_RX_DURATION_EXPIRED || ret == _Z_ERR_TRANSPORT_OPEN_PARTIAL_CONNECTIVITY ||
+            // A router that is going away answers the first message of a handshake with its own Close
+            ret == _Z_ERR_MESSAGE_UNEXPECTED) {
             _Z_DEBUG("Reopen failed, next try in 1s");
             tc->_session = _z_session_rc_clone_as_weak(&zs);
             tc->_state = _Z_TRANSPORT_STATE_RECONNECTING;
